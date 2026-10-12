@@ -4,6 +4,9 @@
 !.env.example
 *.pem
 *.key
+*.jks
+*.keystore
+key.properties
 
 # Python
 __pycache__/
