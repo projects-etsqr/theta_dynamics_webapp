@@ -33,8 +33,7 @@ import urllib.parse as _urlparse
 import zipfile
 import xml.etree.ElementTree as ET
 import requests
-from azure.identity import DefaultAzureCredential, get_bearer_token_provider
-from anthropic import AnthropicFoundry
+from anthropic import AnthropicVertex
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta, timezone, date, time
@@ -138,7 +137,7 @@ try:
 except Exception:
     AZURE_AGENT_RUN_TIMEOUT_SEC = 600
 
-# Initialize Azure Anthropic Foundry client
+# Claude on Vertex AI. Call sites still use these names so the message API stays unchanged.
 azure_ai_client = None
 AZURE_ANTHROPIC_DEPLOYMENT = None
 _azure_ai_init_error = None
@@ -148,51 +147,25 @@ def _init_azure_agent_client(force: bool = False):
     if azure_ai_client is not None and not force:
         return azure_ai_client
 
-    azure_endpoint = os.getenv('AZURE_ANTHROPIC_ENDPOINT')
-    AZURE_ANTHROPIC_DEPLOYMENT = os.getenv('AZURE_ANTHROPIC_DEPLOYMENT')
-    if not azure_endpoint or not AZURE_ANTHROPIC_DEPLOYMENT:
-        _azure_ai_init_error = 'AZURE_ANTHROPIC_ENDPOINT or AZURE_ANTHROPIC_DEPLOYMENT is missing'
+    project_id = os.getenv('VERTEX_PROJECT_ID') or os.getenv('GOOGLE_CLOUD_PROJECT')
+    region = os.getenv('VERTEX_REGION') or os.getenv('GOOGLE_CLOUD_REGION') or 'us-east5'
+    AZURE_ANTHROPIC_DEPLOYMENT = os.getenv('VERTEX_MODEL') or os.getenv('AZURE_ANTHROPIC_DEPLOYMENT')
+    if not project_id or not AZURE_ANTHROPIC_DEPLOYMENT:
+        _azure_ai_init_error = 'VERTEX_PROJECT_ID or VERTEX_MODEL is missing'
         print(f"[WARN] {_azure_ai_init_error}")
-        azure_ai_client = None
-        return None
-
-    if '/anthropic/' not in azure_endpoint:
-        _azure_ai_init_error = 'AZURE_ANTHROPIC_ENDPOINT must include /anthropic/ route'
-        print(f"[WARN] {_azure_ai_init_error}")
-        print(f"[WARN] Current AZURE_ANTHROPIC_ENDPOINT: {azure_endpoint}")
         azure_ai_client = None
         return None
 
     try:
-        api_key = os.getenv('AZURE_ANTHROPIC_API_KEY') or os.getenv('AZURE_AI_API_KEY')
-
-        if api_key:
-            # Key-based auth — works everywhere without Azure CLI / managed identity
-            print('[INFO] Using API key auth for Azure Anthropic Foundry')
-            azure_ai_client = AnthropicFoundry(
-                api_key=api_key,
-                base_url=azure_endpoint
-            )
-        else:
-            # Managed identity / DefaultAzureCredential — only works on Azure-hosted infra
-            print('[INFO] Using DefaultAzureCredential for Azure Anthropic Foundry')
-            _disable_interactive = os.getenv('AZURE_DISABLE_INTERACTIVE_LOGIN', 'true').lower() in ('1', 'true', 'yes')
-            token_provider = get_bearer_token_provider(
-                DefaultAzureCredential(exclude_interactive_browser_credential=_disable_interactive),
-                'https://cognitiveservices.azure.com/.default'
-            )
-            azure_ai_client = AnthropicFoundry(
-                azure_ad_token_provider=token_provider,
-                base_url=azure_endpoint
-            )
-
+        print(f'[INFO] Using Vertex AI Claude in {region} for project {project_id}')
+        azure_ai_client = AnthropicVertex(project_id=project_id, region=region)
         _azure_ai_init_error = None
-        print('[OK] Azure Anthropic Foundry client initialized successfully')
+        print('[OK] Vertex AI Claude client initialized successfully')
         return azure_ai_client
     except Exception as e:
         _azure_ai_init_error = str(e)
         azure_ai_client = None
-        print(f"[WARN] Failed to initialize Azure Anthropic Foundry client: {_azure_ai_init_error}")
+        print(f"[WARN] Failed to initialize Vertex AI Claude client: {_azure_ai_init_error}")
         return None
 
 _init_azure_agent_client()
@@ -320,12 +293,10 @@ def _read_table_sheets_cached(file_path: str) -> dict:
 
 def _generate_claude_response(prompt: str, max_tokens: int = 1024, document_blocks: list | None = None) -> str:
     client = _init_azure_agent_client(force=False)
-    deployment = os.getenv('AZURE_ANTHROPIC_DEPLOYMENT')
-    endpoint = os.getenv('AZURE_ANTHROPIC_ENDPOINT')
-    fallback_api_key = os.getenv('AZURE_ANTHROPIC_API_KEY') or os.getenv('AZURE_AI_API_KEY')
+    deployment = AZURE_ANTHROPIC_DEPLOYMENT
 
     if not client or not deployment:
-        raise RuntimeError('Azure Anthropic service is not available.')
+        raise RuntimeError('Vertex AI Claude service is not available.')
 
     def _run_with_client(active_client):
         if document_blocks:
@@ -367,23 +338,9 @@ def _generate_claude_response(prompt: str, max_tokens: int = 1024, document_bloc
         full_text = '\n'.join([p for p in full_parts if p]).strip()
         return full_text or "I couldn't generate a response at this time."
 
-    try:
-        return _run_with_client(client)
-    except Exception as primary_error:
-        if 'PermissionDenied' not in str(primary_error) or not fallback_api_key or not endpoint:
-            raise
+    return _run_with_client(client)
 
-        try:
-            key_client = AnthropicFoundry(api_key=fallback_api_key, base_url=endpoint)
-            return _run_with_client(key_client)
-        except Exception as fallback_error:
-            raise RuntimeError(
-                'Claude authentication failed for both AAD and API key. '
-                'Check AZURE_ANTHROPIC_ENDPOINT and AZURE_ANTHROPIC_API_KEY/AZURE_AI_API_KEY.'
-            ) from fallback_error
-
-# Non-Azure fallback has been removed.
-# All AI generation flows now run through Azure Anthropic Foundry.
+# Claude calls go through Vertex AI (AnthropicVertex). Message shape is unchanged.
 _pmo_engine = None
 
 # Enable CORS with proper configuration
